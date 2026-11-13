@@ -1,0 +1,10 @@
+# Normalize text files, keep release artifacts binary.
+* text=auto eol=lf
+*.sh text eol=lf
+*.rs text eol=lf
+*.toml text eol=lf
+*.yml text eol=lf
+*.md text eol=lf
+LICENSE text eol=lf
+*.ipk binary
+*.tar.gz binary

@@ -1,0 +1,208 @@
+#!/bin/sh
+#
+# S99wolguard - Entware init script for the wolguard Wake-on-LAN daemon.
+#
+# Installed as /opt/etc/init.d/S99wolguard.
+# Usage: /opt/etc/init.d/S99wolguard {start|stop|restart|status}
+#
+# On Entware, /opt/etc/init.d/rc.func is sourced so that start/stop/restart
+# behave like every other service (boot-time rc.unslung support included).
+# Without rc.func the script falls back to nohup plus a pid file. The script is
+# sourced by rc.unslung during boot, so it must never call `exit` on a normal
+# start/stop path: doing that would abort the remaining boot services.
+
+ENABLED=yes
+DESC="wolguard"
+PROCS=wolguard
+ARGS="--config /opt/etc/wolguard.conf run"
+PREARGS=""
+PRECMD=""
+POSTCMD=""
+PATH=/opt/sbin:/opt/bin:/opt/usr/sbin:/opt/usr/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+RC_FUNC=/opt/etc/init.d/rc.func
+BIN=/opt/bin/wolguard
+CONFIG=/opt/etc/wolguard.conf
+PIDFILE=/opt/var/run/wolguard.pid
+LOGFILE=/opt/var/log/wolguard.log
+
+ACTION=${1:-}
+CALLER=${2:-}
+
+usage() {
+	cat <<EOF
+Usage: $0 {start|stop|restart|status}
+
+  start    start $DESC
+  stop     stop $DESC
+  restart  stop and start $DESC
+  status   report whether $DESC is running
+EOF
+}
+
+# Return success when PID $1 really is a wolguard process. Guards the pid file
+# against a stale pid that was reused by an unrelated process.
+pid_is_wolguard() {
+	[ -r "/proc/$1/comm" ] || return 1
+	_comm=
+	read -r _comm < "/proc/$1/comm" 2>/dev/null || _comm=
+	[ "$_comm" = "wolguard" ]
+}
+
+# Print the pid of a running wolguard process and return success; return
+# failure when the daemon is not running. The pid file is preferred, pidof is
+# the fallback for processes started outside this script.
+running_pid() {
+	if [ -f "$PIDFILE" ]; then
+		_pid=
+		read -r _pid < "$PIDFILE" 2>/dev/null || _pid=
+		case "$_pid" in
+		'' | *[!0-9]*) _pid= ;;
+		esac
+		if [ -n "$_pid" ] && kill -0 "$_pid" 2>/dev/null && pid_is_wolguard "$_pid"; then
+			printf '%s\n' "$_pid"
+			return 0
+		fi
+	fi
+	if command -v pidof >/dev/null 2>&1; then
+		for _pid in `pidof wolguard 2>/dev/null`; do
+			printf '%s\n' "$_pid"
+			return 0
+		done
+	fi
+	return 1
+}
+
+refresh_pidfile() {
+	_pid=`running_pid`
+	if [ -n "$_pid" ]; then
+		mkdir -p "${PIDFILE%/*}" 2>/dev/null
+		printf '%s\n' "$_pid" >"$PIDFILE" 2>/dev/null
+	else
+		rm -f "$PIDFILE" 2>/dev/null
+	fi
+}
+
+do_status() {
+	_pid=`running_pid`
+	if [ "$ENABLED" != "yes" ]; then
+		printf '%s is disabled in %s (ENABLED=%s)\n' "$DESC" "$0" "$ENABLED"
+		if [ -n "$_pid" ]; then
+			printf 'WARNING: a %s process is still running (pid %s)\n' "$DESC" "$_pid"
+		fi
+		return 1
+	fi
+	if [ -n "$_pid" ]; then
+		printf '%s is running (pid %s)\n' "$DESC" "$_pid"
+		return 0
+	fi
+	printf '%s is not running\n' "$DESC"
+	return 1
+}
+
+fallback_start() {
+	_pid=`running_pid`
+	if [ -n "$_pid" ]; then
+		printf '%s is already running (pid %s)\n' "$DESC" "$_pid"
+		return 0
+	fi
+	if [ ! -x "$BIN" ]; then
+		printf 'ERROR: %s is missing or not executable\n' "$BIN" >&2
+		return 1
+	fi
+	mkdir -p "${PIDFILE%/*}" "${LOGFILE%/*}" 2>/dev/null
+	nohup "$BIN" --config "$CONFIG" run >>"$LOGFILE" 2>&1 &
+	_new_pid=$!
+	mkdir -p "${PIDFILE%/*}" 2>/dev/null
+	printf '%s\n' "$_new_pid" >"$PIDFILE" 2>/dev/null
+	sleep 1
+	if kill -0 "$_new_pid" 2>/dev/null; then
+		printf '%s started (pid %s)\n' "$DESC" "$_new_pid"
+		return 0
+	fi
+	rm -f "$PIDFILE" 2>/dev/null
+	printf 'ERROR: %s failed to start, see %s\n' "$DESC" "$LOGFILE" >&2
+	return 1
+}
+
+fallback_stop() {
+	_pid=`running_pid`
+	if [ -z "$_pid" ]; then
+		rm -f "$PIDFILE" 2>/dev/null
+		printf '%s is not running\n' "$DESC"
+		return 0
+	fi
+	kill "$_pid" 2>/dev/null
+	_waited=0
+	while [ "$_waited" -lt 10 ] && kill -0 "$_pid" 2>/dev/null; do
+		sleep 1
+		_waited=$((_waited + 1))
+	done
+	if kill -0 "$_pid" 2>/dev/null; then
+		printf '%s did not stop on SIGTERM, sending SIGKILL\n' "$DESC" >&2
+		kill -9 "$_pid" 2>/dev/null
+		sleep 1
+	fi
+	rm -f "$PIDFILE" 2>/dev/null
+	if kill -0 "$_pid" 2>/dev/null; then
+		printf 'ERROR: cannot stop %s (pid %s)\n' "$DESC" "$_pid" >&2
+		return 1
+	fi
+	printf '%s stopped\n' "$DESC"
+	return 0
+}
+
+fallback_kill() {
+	_pid=`running_pid`
+	if [ -z "$_pid" ]; then
+		rm -f "$PIDFILE" 2>/dev/null
+		printf '%s is not running\n' "$DESC"
+		return 0
+	fi
+	kill -9 "$_pid" 2>/dev/null
+	sleep 1
+	rm -f "$PIDFILE" 2>/dev/null
+	printf '%s killed (pid %s)\n' "$DESC" "$_pid"
+	return 0
+}
+
+# Source the Entware helper. It is sourced from inside a function on purpose:
+# rc.func dispatches on its positional parameters and ends with an implicit
+# status, and returning from the function keeps this script usable both when
+# executed directly and when sourced by rc.unslung.
+run_rc_func() {
+	. "$RC_FUNC"
+}
+
+if [ "$ACTION" = "status" ]; then
+	do_status
+elif [ -f "$RC_FUNC" ]; then
+	if [ "$ENABLED" != "yes" ] && { [ "$ACTION" = "start" ] || [ "$ACTION" = "restart" ]; }; then
+		printf '%s is disabled in %s (ENABLED=%s)\n' "$DESC" "$0" "$ENABLED"
+		true
+	else
+		run_rc_func "$ACTION" "$CALLER"
+		_rc=$?
+		case "$ACTION" in
+		start | stop | restart | kill) refresh_pidfile ;;
+		esac
+		[ "$_rc" -eq 0 ]
+	fi
+elif [ "$ACTION" = "start" ]; then
+	fallback_start
+elif [ "$ACTION" = "stop" ]; then
+	fallback_stop
+elif [ "$ACTION" = "restart" ]; then
+	fallback_stop
+	fallback_start
+elif [ "$ACTION" = "check" ]; then
+	do_status
+elif [ "$ACTION" = "kill" ]; then
+	fallback_kill
+elif [ "$ACTION" = "reconfigure" ]; then
+	printf '%s: reconfigure is not supported, use %s/restart\n' "$DESC" "$0" >&2
+	false
+else
+	usage >&2
+	exit 1
+fi
