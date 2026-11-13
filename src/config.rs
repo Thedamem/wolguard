@@ -43,6 +43,10 @@ fn def_log_file() -> String {
     DEFAULT_LOG_FILE.to_string()
 }
 
+fn def_pid_file() -> String {
+    "/opt/var/run/wolguard.pid".to_string()
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
@@ -68,6 +72,12 @@ pub struct Config {
     /// "-" or "" logs to stdout, otherwise a file path.
     #[serde(default = "def_log_file")]
     pub log_file: String,
+    /// PID file used to keep exactly one daemon/dashboard instance running.
+    #[serde(default = "def_pid_file")]
+    pub pid_file: String,
+    /// Log every failed probe instead of only the first one per outage.
+    #[serde(default)]
+    pub verbose_probes: bool,
     #[serde(default = "Vec::new", rename = "host")]
     pub hosts: Vec<HostConfig>,
 }
@@ -140,6 +150,9 @@ impl Config {
         }
         if self.wol_port == 0 {
             return Err("wol_port must be greater than zero".to_string());
+        }
+        if self.pid_file.trim().is_empty() {
+            return Err("pid_file must not be empty".to_string());
         }
         if let Some(broadcast) = &self.broadcast {
             let broadcast = broadcast.trim();
@@ -311,6 +324,8 @@ max_wakes_per_hour = 3
         assert_eq!(config.wol_port, 9);
         assert_eq!(config.broadcast.as_deref(), Some("auto"));
         assert!(config.wake_on_start);
+        assert_eq!(config.pid_file, "/opt/var/run/wolguard.pid");
+        assert!(!config.verbose_probes);
         let hosts = config.host_settings().expect("hosts must resolve");
         assert_eq!(hosts.len(), 2);
         assert_eq!(hosts[0].mac, [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
@@ -328,6 +343,22 @@ max_wakes_per_hour = 3
             err.contains("check_interval_sec"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn parses_verbose_probes_and_pid_file() {
+        let text = r#"
+pid_file = "/tmp/wolguard-test.pid"
+verbose_probes = true
+
+[[host]]
+name = "server"
+ip = "192.168.1.2"
+mac = "AA:BB:CC:DD:EE:FF"
+"#;
+        let config = Config::from_toml_str(text).expect("config must parse");
+        assert_eq!(config.pid_file, "/tmp/wolguard-test.pid");
+        assert!(config.verbose_probes);
     }
 
     #[test]

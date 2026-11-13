@@ -1,6 +1,6 @@
 [package]
 name = "wolguard"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 rust-version = "1.80"
 description = "Wake-on-LAN guard daemon with a ratatui dashboard for Keenetic/Entware routers"

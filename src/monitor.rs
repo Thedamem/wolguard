@@ -248,71 +248,77 @@ fn register_failure(
 ) {
     let mut infos: Vec<String> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
+    let mut wake_now = false;
 
-    let wake_now = {
+    {
         let mut snapshot = lock(snapshot);
-        let status = &mut snapshot.hosts[index];
-        status.last_check = Some(now);
-        status.consecutive_failures = status.consecutive_failures.saturating_add(1);
         let threshold = host.settings.failures_before_wake;
-        if status.consecutive_failures < threshold {
-            snapshot.last_update = now;
-            return;
-        }
-
-        let first_offline = !matches!(status.state, HostState::Offline | HostState::Waking);
-        if first_offline {
-            status.state = HostState::Offline;
-            warnings.push(format!(
-                "{} ({}) is offline ({} failed checks)",
-                host.settings.name, host.settings.ip, status.consecutive_failures
+        let failures = {
+            let status = &mut snapshot.hosts[index];
+            status.last_check = Some(now);
+            status.consecutive_failures = status.consecutive_failures.saturating_add(1);
+            status.consecutive_failures
+        };
+        if failures == 1 || config.verbose_probes {
+            infos.push(format!(
+                "no reply from {} ({}) [{}/{}]",
+                host.settings.name, host.settings.ip, failures, threshold
             ));
-        }
-
-        let can_wake = config.wake_on_start || host.ever_online || status.wake_count > 0;
-        if !can_wake {
-            if first_offline {
-                infos.push(format!(
-                    "{} ({}): Wake-on-LAN suppressed (wake_on_start = false and the host was never seen online)",
-                    host.settings.name, host.settings.ip
-                ));
-            }
-            snapshot.last_update = now;
-            return;
-        }
-
-        let cooldown_ok = status
-            .last_wake
-            .map(|last_wake| {
-                now.duration_since(last_wake)
-                    .map(|elapsed| elapsed >= host.settings.wake_retry)
-                    .unwrap_or(true)
-            })
-            .unwrap_or(true);
-        if !cooldown_ok {
-            snapshot.last_update = now;
-            return;
-        }
-
-        let now_instant = Instant::now();
-        while let Some(oldest) = host.wake_history.front().copied() {
-            if now_instant.saturating_duration_since(oldest) >= WAKE_HISTORY_WINDOW {
-                host.wake_history.pop_front();
-            } else {
-                break;
-            }
-        }
-        if host.wake_history.len() as u32 >= host.settings.max_wakes_per_hour {
-            warnings.push(format!(
-                "{} ({}): wake rate limit reached ({}/hour), not sending Wake-on-LAN",
-                host.settings.name, host.settings.ip, host.settings.max_wakes_per_hour
-            ));
-            snapshot.last_update = now;
-            return;
         }
         snapshot.last_update = now;
-        true
-    };
+
+        if failures >= threshold {
+            let first_offline = !matches!(
+                snapshot.hosts[index].state,
+                HostState::Offline | HostState::Waking
+            );
+            if first_offline {
+                snapshot.hosts[index].state = HostState::Offline;
+                warnings.push(format!(
+                    "{} ({}) is offline ({} failed checks)",
+                    host.settings.name, host.settings.ip, failures
+                ));
+            }
+
+            let can_wake =
+                config.wake_on_start || host.ever_online || snapshot.hosts[index].wake_count > 0;
+            if !can_wake {
+                if first_offline {
+                    infos.push(format!(
+                        "{} ({}): Wake-on-LAN suppressed (wake_on_start = false and the host was never seen online)",
+                        host.settings.name, host.settings.ip
+                    ));
+                }
+            } else {
+                let cooldown_ok = snapshot.hosts[index]
+                    .last_wake
+                    .map(|last_wake| {
+                        now.duration_since(last_wake)
+                            .map(|elapsed| elapsed >= host.settings.wake_retry)
+                            .unwrap_or(true)
+                    })
+                    .unwrap_or(true);
+                if cooldown_ok {
+                    let now_instant = Instant::now();
+                    while let Some(oldest) = host.wake_history.front().copied() {
+                        if now_instant.saturating_duration_since(oldest) >= WAKE_HISTORY_WINDOW {
+                            host.wake_history.pop_front();
+                        } else {
+                            break;
+                        }
+                    }
+                    if host.wake_history.len() as u32 >= host.settings.max_wakes_per_hour {
+                        warnings.push(format!(
+                            "{} ({}): wake rate limit reached ({}/hour), not sending Wake-on-LAN",
+                            host.settings.name, host.settings.ip, host.settings.max_wakes_per_hour
+                        ));
+                    } else {
+                        wake_now = true;
+                    }
+                }
+            }
+        }
+    }
 
     for message in infos {
         logger.info(message);

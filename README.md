@@ -113,6 +113,8 @@ Then validate and restart the service:
 | `broadcast` | `"auto"` | `"auto"` or an explicit IPv4 broadcast address |
 | `wol_port` | `9` | Wake-on-LAN UDP port |
 | `log_file` | `/opt/var/log/wolguard.log` | Log file, or `"-"` for stdout |
+| `pid_file` | `/opt/var/run/wolguard.pid` | PID file used to keep a single daemon/dashboard instance running |
+| `verbose_probes` | `false` | Log every failed probe instead of only the first one per outage |
 
 ### Host options
 
@@ -130,7 +132,8 @@ Then validate and restart the service:
 wolguard [--config PATH] <command>
 
   run            run the monitor loop in the foreground (used by the init script)
-  tui            interactive dashboard (requires a TTY)
+  tui            interactive dashboard (requires a TTY, e.g. an SSH session)
+  status         one-shot state snapshot with a live probe (works without a TTY)
   wake <host>    send one magic packet now; <host> is a name, an IP or a 1-based index
   check-config   validate the configuration and print resolved settings
 ```
@@ -142,7 +145,7 @@ wolguard [--config PATH] <command>
 ```
 
 ```text
-┌ wolguard 0.1.0 ────────────────────────────────────────────────────────────────┐
+┌ wolguard 0.1.1 ────────────────────────────────────────────────────────────────┐
 │ config /opt/etc/wolguard.conf   uptime 2h 14m   wake 192.168.1.255 (br0) udp 9 │
 ├ hosts (2) ─────────────────────────────────────────────────────────────────────┤
 │ #   Name     IP             MAC                State    RTT      Last seen Wakes │
@@ -158,6 +161,27 @@ wolguard [--config PATH] <command>
 ```
 
 Keys: `q` / `Esc` / `Ctrl-C` quit, `Up` / `Down` (or `k` / `j`) select a host, `w` sends a magic packet to the selected host, `e` toggles monitoring for it. On terminals narrower than 95 columns secondary columns are hidden so the table stays readable.
+
+The dashboard needs an interactive terminal: run it from an SSH session (for example PuTTY or any terminal emulator). The Keenetic web console has no PTY and cannot host a TUI — use the `status` command there instead.
+
+### Status without a dashboard
+
+`wolguard status` prints a one-shot snapshot with a live probe of every host. It needs no TTY, so it works from any shell, including the Keenetic web console:
+
+```sh
+/opt/bin/wolguard status
+```
+
+```text
+wolguard 0.1.1 status
+config: /opt/etc/wolguard.conf
+daemon: running (pid 8647)
+log: /opt/var/log/wolguard.log
+wake policy: after 5 failed checks, retry every 600 s, at most 6/hour
+hosts: 1
+  1. server (192.168.2.67) mac 22:56:4d:05:0c:00 - online, rtt 2.9 ms
+     enabled, wake target 192.168.2.255 via br0, ping every 100 s, first wake after ~500 s
+```
 
 ### Logs
 
@@ -184,6 +208,8 @@ tail -f /opt/var/log/wolguard.log
 | `cannot bind ... br0: Operation not permitted` | Run as root (the Entware init script does). |
 | `cannot open a raw ICMP socket` | Same: raw sockets require root. |
 | Wakes every 10 minutes with no effect | This is the retry policy for a host that never comes back. Lower `max_wakes_per_hour` or set `enabled = false` for that host. |
+| `wolguard tui` fails with `Not a tty (os error 25)` | The dashboard needs a real terminal. On Keenetic `/dev/tty` may not implement `TIOCGWINSZ`; wolguard 0.1.1+ resolves the size from stdin/stdout instead, so update with the one-command installer. In the Keenetic web console there is no PTY at all — use `wolguard status` there or connect over SSH. |
+| Two wolguard processes fight over the same hosts | 0.1.1+ refuses to start a second instance and prints the running PID. Stop the old process: `killall wolguard` or `/opt/etc/init.d/S99wolguard stop`. |
 
 ## Building from source
 
@@ -220,6 +246,7 @@ src/
   wol.rs       magic packet construction and delivery
   monitor.rs   probing/wake state machine
   tui.rs       ratatui dashboard
+  term.rs      terminal backend with router-proof size detection
   log.rs       file/stdout/ring-buffer logging
   model.rs     shared types between monitor and dashboard
   util.rs      formatting helpers

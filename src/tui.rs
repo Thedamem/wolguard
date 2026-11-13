@@ -9,7 +9,6 @@ use std::io::{self, IsTerminal};
 use std::sync::mpsc::Sender;
 use std::time::{Duration, SystemTime};
 
-use ratatui::backend::CrosstermBackend;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::crossterm::{cursor, execute, terminal};
 use ratatui::layout::{Alignment, Constraint, Rect};
@@ -21,6 +20,7 @@ use ratatui::{Frame, Terminal};
 use crate::model::{
     Command, HostState, HostStatus, LogLevel, LogLine, SharedLogs, SharedSnapshot, Snapshot,
 };
+use crate::term::RouterBackend;
 use crate::util::{format_age, format_hms, format_mac, format_millis, format_uptime};
 
 /// Event poll timeout: keyboard latency on one side, idle CPU use on the other.
@@ -42,10 +42,7 @@ pub fn run(
     commands: Sender<Command>,
 ) -> io::Result<()> {
     if !io::stdout().is_terminal() || !io::stdin().is_terminal() {
-        return Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "wolguard tui requires a terminal (stdin and stdout must be a TTY)",
-        ));
+        return Err(not_a_terminal());
     }
 
     install_panic_hook();
@@ -59,22 +56,22 @@ pub fn run(
 
 /// Alternate screen + raw mode + hidden cursor, undone on drop.
 struct TerminalSession {
-    terminal: Terminal<CrosstermBackend<io::Stdout>>,
+    terminal: Terminal<RouterBackend>,
 }
 
 impl TerminalSession {
     fn enter() -> io::Result<Self> {
-        terminal::enable_raw_mode()?;
+        terminal::enable_raw_mode().map_err(raw_mode_error)?;
         let mut stdout = io::stdout();
         if let Err(err) = execute!(stdout, terminal::EnterAlternateScreen, cursor::Hide) {
             let _ = terminal::disable_raw_mode();
-            return Err(err);
+            return Err(terminal_error(err));
         }
-        match Terminal::new(CrosstermBackend::new(stdout)) {
+        match Terminal::new(RouterBackend::new(stdout)) {
             Ok(terminal) => Ok(TerminalSession { terminal }),
             Err(err) => {
                 restore_terminal();
-                Err(err)
+                Err(terminal_error(err))
             }
         }
     }
@@ -93,6 +90,37 @@ fn restore_terminal() {
     let _ = terminal::disable_raw_mode();
 }
 
+fn not_a_terminal() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::Unsupported,
+        "wolguard tui needs an interactive terminal: stdin and stdout must be a TTY. \
+         Connect over SSH from a computer (the Keenetic web console has no PTY). \
+         For a one-shot status view use `wolguard status`.",
+    )
+}
+
+fn raw_mode_error(err: io::Error) -> io::Error {
+    io::Error::new(
+        err.kind(),
+        format!(
+            "cannot switch the terminal to raw mode: {err}. \
+             Run the dashboard from a real SSH session; \
+             for a one-shot status view use `wolguard status`."
+        ),
+    )
+}
+
+fn terminal_error(err: io::Error) -> io::Error {
+    io::Error::new(
+        err.kind(),
+        format!(
+            "cannot start the terminal dashboard: {err}. \
+             Run it from a real SSH session; \
+             for a one-shot status view use `wolguard status`."
+        ),
+    )
+}
+
 /// Restore the terminal before the default hook prints the panic message.
 ///
 /// The release profile uses `panic = "abort"`, so an unwinding `Drop` guard is
@@ -107,7 +135,7 @@ fn install_panic_hook() {
 }
 
 fn event_loop(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    terminal: &mut Terminal<RouterBackend>,
     snapshot: &SharedSnapshot,
     logs: &SharedLogs,
     commands: &Sender<Command>,
@@ -203,7 +231,7 @@ impl UiState {
 }
 
 fn draw(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    terminal: &mut Terminal<RouterBackend>,
     snapshot: &SharedSnapshot,
     logs: &SharedLogs,
     ui: &mut UiState,

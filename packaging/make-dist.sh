@@ -61,7 +61,14 @@ tar --format=gnu --numeric-owner --owner=0 --group=0 --sort=name --mtime=@0 \
 	die "cannot create $OUT_DIR/$BUNDLE_NAME"
 
 # Stable download name for `releases/latest/download/wolguard-mipsel.ipk`.
-IPK=`ls "$OUT_DIR"/wolguard_*_mipsel-3.4.ipk 2>/dev/null | head -n 1 || true`
+# Prefer the package built from the current Cargo.toml version so that a stale
+# .ipk left in dist/ by an older build can never be published as "latest".
+VERSION=`sed -n 's/^version *= *"\([^"]*\)".*/\1/p' "$ROOT/Cargo.toml" 2>/dev/null | head -n 1`
+IPK=
+if [ -n "$VERSION" ]; then
+	IPK=`ls "$OUT_DIR"/wolguard_"$VERSION"-*_mipsel-3.4.ipk 2>/dev/null | head -n 1 || true`
+fi
+[ -n "$IPK" ] || IPK=`ls -t "$OUT_DIR"/wolguard_*_mipsel-3.4.ipk 2>/dev/null | head -n 1 || true`
 if [ -n "$IPK" ]; then
 	cp -f "$IPK" "$OUT_DIR/wolguard-mipsel.ipk"
 fi
@@ -82,6 +89,12 @@ done
 for asset in "$OUT_DIR"/wolguard_*_mipsel-3.4.ipk; do
 	[ -f "$asset" ] || continue
 	name=`basename "$asset"`
+	if [ -n "$VERSION" ]; then
+		case "$name" in
+		wolguard_"$VERSION"-*_mipsel-3.4.ipk) ;;
+		*) continue ;;
+		esac
+	fi
 	grep -q " $name\$" "$OUT_DIR/SHA256SUMS" 2>/dev/null && continue
 	printf '%s  %s\n' "`sha256_of "$asset"`" "$name" >>"$OUT_DIR/SHA256SUMS"
 done

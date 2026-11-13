@@ -10,6 +10,7 @@ mod model;
 mod monitor;
 mod net;
 mod ping;
+mod term;
 mod tui;
 mod util;
 mod wol;
@@ -27,6 +28,7 @@ use clap::{Parser, Subcommand};
 use crate::config::{Config, HostSettings};
 use crate::log::Logger;
 use crate::model::{Command, LogBuffer, SharedSnapshot, Snapshot};
+use crate::ping::{PingOutcome, Pinger};
 use crate::util::{format_mac, format_millis};
 
 static STOP: AtomicBool = AtomicBool::new(false);
@@ -81,8 +83,10 @@ struct Cli {
 enum CliCommand {
     /// Run the monitor loop in the foreground (used by the init script).
     Run,
-    /// Show the interactive dashboard (requires a terminal).
+    /// Show the interactive dashboard (requires a terminal over SSH).
     Tui,
+    /// Print a one-shot status snapshot (works without a TTY, e.g. in the web console).
+    Status,
     /// Send one Wake-on-LAN packet and exit.
     Wake {
         /// Host name, IP address or 1-based index from the configuration.
@@ -97,6 +101,7 @@ fn main() {
     let result = match cli.command {
         CliCommand::Run => run_daemon(&cli.config),
         CliCommand::Tui => run_tui(&cli.config),
+        CliCommand::Status => run_status(&cli.config),
         CliCommand::Wake { host } => run_wake(&cli.config, &host),
         CliCommand::CheckConfig => run_check_config(&cli.config),
     };
@@ -140,6 +145,7 @@ fn initial_snapshot(hosts: &[HostSettings], config: &Config, path: &Path) -> Sha
 
 fn run_daemon(path: &Path) -> Result<(), String> {
     let (config, hosts) = load_config(path)?;
+    let _instance = InstanceLock::acquire(Path::new(&config.pid_file))?;
     let (logger, _logs) = build_logger(&config);
     install_signal_handlers();
     let snapshot = initial_snapshot(&hosts, &config, path);
@@ -162,6 +168,7 @@ fn run_daemon(path: &Path) -> Result<(), String> {
 
 fn run_tui(path: &Path) -> Result<(), String> {
     let (config, hosts) = load_config(path)?;
+    let _instance = InstanceLock::acquire(Path::new(&config.pid_file))?;
     let (logger, logs) = build_quiet_logger(&config);
     install_signal_handlers();
     let snapshot = initial_snapshot(&hosts, &config, path);
@@ -236,6 +243,7 @@ fn run_check_config(path: &Path) -> Result<(), String> {
             config.log_file.clone()
         }
     );
+    println!("  pid file: {}", config.pid_file);
     println!(
         "  defaults: check every {} s, ping timeout {} ms, wake after {} failures, retry {} s",
         config.check_interval_secs,
@@ -277,11 +285,138 @@ fn run_check_config(path: &Path) -> Result<(), String> {
             host.wake_retry.as_secs(),
             host.max_wakes_per_hour
         );
+        println!(
+            "     first wake attempt after ~{} s of downtime",
+            host.failures_before_wake as u64 * host.check_interval.as_secs()
+        );
     }
     println!(
-        "Wake-on-LAN packet: 102 bytes, broadcast udp {}",
-        format_millis(Duration::from_millis(config.ping_timeout_ms))
+        "Wake-on-LAN packet: 102 bytes (6 x ff + 16 x MAC), udp port {}",
+        config.wol_port
     );
     println!("configuration OK");
     Ok(())
+}
+
+/// One-shot status snapshot for terminals that cannot host the dashboard, for
+/// example the Keenetic web console, which does not provide a PTY.
+fn run_status(path: &Path) -> Result<(), String> {
+    let (config, hosts) = load_config(path)?;
+    println!("wolguard {} status", env!("CARGO_PKG_VERSION"));
+    println!("config: {}", path.display());
+    println!(
+        "daemon: {}",
+        match running_instance_pid(Path::new(&config.pid_file)) {
+            Some(pid) => format!("running (pid {pid})"),
+            None => "not running".to_string(),
+        }
+    );
+    println!(
+        "log: {}",
+        if config.logs_to_stdout() {
+            "stdout".to_string()
+        } else {
+            config.log_file.clone()
+        }
+    );
+    println!(
+        "wake policy: after {} failed checks, retry every {} s, at most {}/hour",
+        config.failures_before_wake, config.wake_retry_secs, config.max_wakes_per_hour
+    );
+
+    let mut pinger = match Pinger::new() {
+        Ok(pinger) => Some(pinger),
+        Err(err) => {
+            println!("probe: unavailable ({err}); raw ICMP requires root");
+            None
+        }
+    };
+    println!("hosts: {}", hosts.len());
+    for (index, host) in hosts.iter().enumerate() {
+        let state = match pinger.as_mut() {
+            Some(pinger) => match pinger.ping(host.ip, config.ping_timeout()) {
+                PingOutcome::Reply(rtt) => format!("online, rtt {}", format_millis(rtt)),
+                PingOutcome::Timeout => "offline (no reply)".to_string(),
+                PingOutcome::Error(err) => format!("probe error: {err}"),
+            },
+            None => "unknown".to_string(),
+        };
+        let target = wol::resolve_wake_target(host.ip, config.broadcast.as_deref());
+        println!(
+            "  {}. {} ({}) mac {} - {}",
+            index + 1,
+            host.name,
+            host.ip,
+            format_mac(host.mac),
+            state
+        );
+        println!(
+            "     {}, wake target {}, ping every {} s, first wake after ~{} s",
+            if host.enabled { "enabled" } else { "disabled" },
+            target,
+            host.check_interval.as_secs(),
+            host.failures_before_wake as u64 * host.check_interval.as_secs()
+        );
+    }
+    Ok(())
+}
+
+/// Keeps exactly one daemon/dashboard instance alive and records its PID.
+struct InstanceLock {
+    path: PathBuf,
+}
+
+impl InstanceLock {
+    fn acquire(path: &Path) -> Result<InstanceLock, String> {
+        if let Some(pid) = running_instance_pid(path) {
+            return Err(format!(
+                "another wolguard instance is already running (pid {pid}); \
+                 stop it first: /opt/etc/init.d/S99wolguard stop"
+            ));
+        }
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+        }
+        std::fs::write(path, format!("{}\n", std::process::id()))
+            .map_err(|err| format!("cannot write pid file {}: {err}", path.display()))?;
+        Ok(InstanceLock {
+            path: path.to_path_buf(),
+        })
+    }
+}
+
+impl Drop for InstanceLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// PID from `path` when that process really is a wolguard instance.
+fn running_instance_pid(path: &Path) -> Option<u32> {
+    let pid = std::fs::read_to_string(path)
+        .ok()?
+        .trim()
+        .parse::<u32>()
+        .ok()?;
+    if process_is_wolguard(pid) {
+        Some(pid)
+    } else {
+        None
+    }
+}
+
+fn process_is_wolguard(pid: u32) -> bool {
+    let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).unwrap_or_default();
+    if comm.trim() == "wolguard" {
+        return true;
+    }
+    let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
+    let first = cmdline.split(|byte| *byte == 0).next().unwrap_or(&[]);
+    let name = Path::new(std::str::from_utf8(first).unwrap_or(""))
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+    name.starts_with("wolguard")
 }
