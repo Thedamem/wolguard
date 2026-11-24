@@ -69,6 +69,9 @@ pub fn initial_snapshot(
         wol_port: config.wol_port,
         wake_target: summarize_wake_target(settings, config),
         last_update: started_at,
+        wol_enabled: config.wol_enabled,
+        wan: Vec::new(),
+        session_signals: Vec::new(),
     }
 }
 
@@ -88,7 +91,7 @@ fn summarize_wake_target(settings: &[HostSettings], config: &Config) -> String {
 }
 
 fn monitor_loop(
-    config: Config,
+    mut config: Config,
     logger: Logger,
     snapshot: SharedSnapshot,
     commands: Receiver<Command>,
@@ -100,7 +103,7 @@ fn monitor_loop(
             return;
         }
     };
-    let timeout = config.ping_timeout();
+    let mut timeout = config.ping_timeout();
     let mut pinger = match Pinger::new() {
         Ok(pinger) => Some(pinger),
         Err(err) => {
@@ -152,15 +155,31 @@ fn monitor_loop(
                     logger.info("monitor stopped");
                     return;
                 }
-                Command::WakeNow(index) => {
-                    if let Some(host) = hosts.get_mut(index) {
-                        manual_wake(index, host, &config, &logger, &snapshot);
+                Command::WakeNow(name) => {
+                    if let Some(index) = hosts.iter().position(|host| host.settings.name == name) {
+                        if let Some(host) = hosts.get_mut(index) {
+                            manual_wake(index, host, &config, &logger, &snapshot);
+                        }
                     }
                 }
                 Command::ToggleEnabled(index) => {
                     if let Some(host) = hosts.get_mut(index) {
                         toggle_enabled(index, host, &logger, &snapshot);
                     }
+                }
+                Command::Reload {
+                    config: new_config,
+                    reply,
+                } => {
+                    let result = reload_hosts(
+                        *new_config,
+                        &mut config,
+                        &mut hosts,
+                        &mut timeout,
+                        &logger,
+                        &snapshot,
+                    );
+                    let _ = reply.send(result);
                 }
             }
         }
@@ -183,6 +202,94 @@ fn monitor_loop(
         }
         thread::sleep(TICK);
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn reload_hosts(
+    new_config: Config,
+    config: &mut Config,
+    hosts: &mut Vec<RuntimeHost>,
+    timeout: &mut Duration,
+    logger: &Logger,
+    snapshot: &SharedSnapshot,
+) -> Result<(), String> {
+    new_config.validate()?;
+    let settings = new_config.host_settings()?;
+
+    let mut old_hosts = std::mem::take(hosts);
+    let mut new_hosts = Vec::with_capacity(settings.len());
+    for settings in settings {
+        if let Some(index) = old_hosts.iter().position(|host| {
+            host.settings.name == settings.name
+                && host.settings.ip == settings.ip
+                && host.settings.mac == settings.mac
+        }) {
+            let mut host = old_hosts.remove(index);
+            host.settings = settings;
+            new_hosts.push(host);
+        } else {
+            new_hosts.push(RuntimeHost {
+                settings,
+                next_check: Instant::now(),
+                wake_history: VecDeque::new(),
+                ever_online: false,
+                last_error: None,
+            });
+        }
+    }
+    *hosts = new_hosts;
+    *config = new_config;
+    *timeout = config.ping_timeout();
+
+    let now = SystemTime::now();
+    let mut snapshot = lock(snapshot);
+    let old_statuses = std::mem::take(&mut snapshot.hosts);
+    let mut new_statuses = Vec::with_capacity(hosts.len());
+    for host in hosts.iter() {
+        if let Some(status) = old_statuses.iter().find(|status| {
+            status.name == host.settings.name
+                && status.ip == host.settings.ip
+                && status.mac == host.settings.mac
+        }) {
+            new_statuses.push(status.clone());
+        } else {
+            new_statuses.push(HostStatus {
+                name: host.settings.name.clone(),
+                ip: host.settings.ip,
+                mac: host.settings.mac,
+                enabled: host.settings.enabled,
+                state: if host.settings.enabled {
+                    HostState::Unknown
+                } else {
+                    HostState::Disabled
+                },
+                consecutive_failures: 0,
+                last_rtt: None,
+                last_ok: None,
+                last_check: None,
+                last_wake: None,
+                wake_count: 0,
+            });
+        }
+    }
+    for status in &mut new_statuses {
+        if let Some(host) = hosts.iter().find(|host| host.settings.name == status.name) {
+            status.enabled = host.settings.enabled;
+            if !host.settings.enabled {
+                status.state = HostState::Disabled;
+            } else if matches!(status.state, HostState::Disabled) {
+                status.state = HostState::Unknown;
+            }
+        }
+    }
+    snapshot.hosts = new_statuses;
+    let settings: Vec<HostSettings> = hosts.iter().map(|host| host.settings.clone()).collect();
+    snapshot.wake_target = summarize_wake_target(&settings, config);
+    snapshot.wol_port = config.wol_port;
+    snapshot.wol_enabled = config.wol_enabled;
+    snapshot.last_update = now;
+    logger.info(format!("configuration reloaded: {} host(s)", hosts.len()));
+    Ok(())
 }
 
 fn check_host(

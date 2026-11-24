@@ -23,7 +23,7 @@
 #   --force      install even when the binary does not look like MIPS ELF32
 #   --uninstall  stop the service, remove /opt/bin/wolguard and the init
 #                script, keep /opt/etc/wolguard.conf
-#   --purge      like --uninstall, also remove config, log and pid file
+#   --purge      like --uninstall, also remove config, log, pid, state and backup
 #   -h, --help   show this help
 #
 # Exit codes:
@@ -43,6 +43,8 @@ CONFIG=/opt/etc/wolguard.conf
 INIT=/opt/etc/init.d/S99wolguard
 LOGFILE=/opt/var/log/wolguard.log
 PIDFILE=/opt/var/run/wolguard.pid
+STATEFILE=/opt/var/run/wolguard.state
+CONTROL_SOCKET=/tmp/wolguard.sock
 
 ACTION=install
 NO_START=no
@@ -76,7 +78,7 @@ Options:
   --force      install even if the binary does not look like MIPS ELF32
   --uninstall  stop the service and remove the binary and init script,
                keep $CONFIG
-  --purge      like --uninstall, also remove the config, log and pid file
+  --purge      like --uninstall, also remove the config, log, pid, state and backup
   -h, --help   show this help
 
 Files installed:
@@ -274,15 +276,19 @@ print_next_steps() {
 wolguard is installed.
 
 Next steps:
-  1. edit $CONFIG: replace the example host and its MAC address
-  2. validate it:  $BIN_DST --config $CONFIG check-config
-  3. wake a host:  $BIN_DST wake server
-  4. dashboard:    $BIN_DST tui
-  5. status:       $INIT status
-     logs:         tail -f $LOGFILE
+  1. configure hosts and PPPoE:  $BIN_DST --config $CONFIG setup
+     (or edit $CONFIG by hand; comments are preserved by the CLI/TUI)
+  2. validate it:                $BIN_DST --config $CONFIG check-config
+  3. scan PPPoE interfaces:      $BIN_DST --config $CONFIG pppoe
+  4. wake a host:                $BIN_DST wake server
+  5. dashboard:                  $BIN_DST tui
+  6. diagnose:                   $BIN_DST --config $CONFIG doctor
+     status:                     $INIT status
+     logs:                       tail -f $LOGFILE
 
 The service starts automatically at boot (Entware rc.unslung runs S99wolguard
-after the network is up).
+after the network is up). The TUI and CLI attach to the running daemon through
+the control socket; they do not start a second monitor.
 EOF
 }
 
@@ -318,16 +324,19 @@ remove_file() {
 uninstall() {
 	REMOVE_FAILED=0
 	stop_service
+	remove_file "$CONTROL_SOCKET"
 	remove_file "$PIDFILE"
 	remove_file "$BIN_DST"
 	remove_file "$BIN_DST.bak"
 	remove_file "$INIT"
 	if [ "$ACTION" = "purge" ]; then
 		remove_file "$CONFIG"
+		remove_file "$CONFIG.bak"
 		remove_file "$LOGFILE"
-		info "purged configuration and log"
+		remove_file "$STATEFILE"
+		info "purged configuration, log and runtime state"
 	else
-		info "kept $CONFIG (use --purge to remove it too)"
+		info "kept $CONFIG and $STATEFILE (use --purge to remove them too)"
 	fi
 	if [ "$REMOVE_FAILED" -ne 0 ]; then
 		exit 4

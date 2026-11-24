@@ -1,13 +1,12 @@
 [package]
 name = "wolguard"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.80"
-description = "Wake-on-LAN guard daemon with a ratatui dashboard for Keenetic/Entware routers"
+description = "Wake-on-LAN guard and PPPoE white-IP watchdog with a TUI for Keenetic/Entware routers"
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/Thedamem/wolguard"
-homepage = "https://github.com/Thedamem/wolguard"
 keywords = ["wake-on-lan", "wol", "keenetic", "entware", "router"]
 categories = ["command-line-utilities", "network-programming"]
 authors = ["wolguard contributors"]
@@ -21,7 +20,9 @@ clap = { version = "4.5", features = ["derive"] }
 libc = "0.2"
 ratatui = "0.29"
 serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 toml = "0.8"
+toml_edit = "0.22"
 
 [profile.release]
 opt-level = "s"

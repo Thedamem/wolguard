@@ -46,7 +46,12 @@ pid_is_wolguard() {
 	[ -r "/proc/$1/comm" ] || return 1
 	_comm=
 	read -r _comm < "/proc/$1/comm" 2>/dev/null || _comm=
-	[ "$_comm" = "wolguard" ]
+	[ "$_comm" = "wolguard" ] || return 1
+	# The daemon is the `run` subcommand; a CLI command is not the service.
+	if [ -r "/proc/$1/cmdline" ]; then
+		tr '\0' ' ' <"/proc/$1/cmdline" 2>/dev/null | grep -q ' run' || return 1
+	fi
+	return 0
 }
 
 # Print the pid of a running wolguard process and return success; return
@@ -134,7 +139,7 @@ fallback_stop() {
 	fi
 	kill "$_pid" 2>/dev/null
 	_waited=0
-	while [ "$_waited" -lt 10 ] && kill -0 "$_pid" 2>/dev/null; do
+	while [ "$_waited" -lt 25 ] && kill -0 "$_pid" 2>/dev/null; do
 		sleep 1
 		_waited=$((_waited + 1))
 	done
