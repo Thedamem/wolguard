@@ -32,7 +32,7 @@
 # Environment:
 #   VERSION            full package version, overrides Cargo.toml + REVISION
 #   REVISION           package revision appended to the Cargo.toml version
-#                      (default: 1, giving Version: 0.1.0-1)
+#                      (default: 1, giving Version: 0.2.0-1)
 #   ARCH               package architecture (default: mipsel-3.4)
 #   DEPENDS            runtime dependencies (default: empty, the binary is
 #                      static musl, so there is no libc dependency)
@@ -95,7 +95,7 @@ Environment:
   IPK_FORMAT         "tar" or "ar", same as --tar/--ar
   SOURCE_DATE_EPOCH  fixed timestamp for reproducible builds (default: 0)
 
-The result is e.g. $ROOT/dist/${PKG_NAME}_0.1.0-1_${ARCH}.ipk
+The result is e.g. $ROOT/dist/${PKG_NAME}_0.2.0-1_${ARCH}.ipk
 EOF
 }
 
@@ -288,7 +288,7 @@ if [ -z "${VERSION:-}" ]; then
 			}
 		' "$ROOT/Cargo.toml"`
 	fi
-	[ -n "$_upstream" ] || _upstream=0.1.0
+	[ -n "$_upstream" ] || _upstream=0.2.0
 	VERSION="${_upstream}-${REVISION}"
 fi
 
@@ -359,10 +359,11 @@ INSTALLED_SIZE=`gzip -dc "$WORK/data.tar.gz" | wc -c | tr -d ' '`
 	printf 'Maintainer: %s\n' "$MAINTAINER"
 	printf 'Architecture: %s\n' "$ARCH"
 	printf 'Installed-Size: %s\n' "$INSTALLED_SIZE"
-	printf 'Description: Wake-on-LAN guard daemon for Keenetic/Entware routers\n'
-	printf ' Probes the configured LAN hosts with ICMP and sends Wake-on-LAN\n'
-	printf ' magic packets when a host stops answering. Includes a terminal\n'
-	printf ' dashboard (wolguard tui) and config validation (check-config).\n'
+	printf 'Description: Wake-on-LAN guard and PPPoE white-IP watchdog for Keenetic/Entware\n'
+	printf ' Probes the configured LAN hosts with ICMP and sends Wake-on-LAN magic\n'
+	printf ' packets when a host stops answering. Watches PPPoE interfaces through\n'
+	printf ' local RCI and restarts a session until a white IPv4 appears. Includes\n'
+	printf ' a TUI management console, CLI, recovery marker and RCI diagnostics.\n'
 } >"$CTRL/control" || die "cannot write control"
 printf '/opt/etc/wolguard.conf\n' >"$CTRL/conffiles" || die "cannot write conffiles"
 

@@ -68,7 +68,7 @@ pub fn format_uptime(started: SystemTime, now: SystemTime) -> String {
     format_seconds(secs)
 }
 
-fn format_seconds(total_secs: u64) -> String {
+pub fn format_seconds(total_secs: u64) -> String {
     if total_secs < 60 {
         return format!("{total_secs}s");
     }

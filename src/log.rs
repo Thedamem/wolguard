@@ -107,7 +107,9 @@ impl Logger {
                 .logs
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let seq = buffer.last_seq().saturating_add(1);
             buffer.push(LogLine {
+                seq,
                 at: now,
                 level,
                 text: text.clone(),
@@ -148,5 +150,21 @@ mod tests {
         assert_eq!(lines[0].level, LogLevel::Info);
         assert_eq!(lines[0].text, "hello");
         assert_eq!(lines[1].level, LogLevel::Warn);
+    }
+
+    #[test]
+    fn assigns_monotonic_sequence_numbers_and_supports_after() {
+        let logs = Arc::new(Mutex::new(LogBuffer::new(10)));
+        let logger = Logger::stdout_only(logs.clone());
+        logger.info("a");
+        logger.info("b");
+        let logs = logs.lock().unwrap();
+        let lines: Vec<_> = logs.iter().collect();
+        assert_eq!(lines[0].seq, 1);
+        assert_eq!(lines[1].seq, 2);
+        assert_eq!(logs.last_seq(), 2);
+        let newer = logs.after(1, 10);
+        assert_eq!(newer.len(), 1);
+        assert_eq!(newer[0].text, "b");
     }
 }
